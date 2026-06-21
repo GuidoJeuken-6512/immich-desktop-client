@@ -2,7 +2,9 @@ api:
   key: <API-KEY>
   url: https://<IMMICH_SERVER_DOMAIN>/api
   album: <OPTIONAL; OVERRIDE THE DEFAULT ALBUM NAME>
+  album_by_year: false
 watchdog:
+  recursive: false
   directories:
     - C:\Users\test\Images\
     - C:\Users\test\Screenshots\

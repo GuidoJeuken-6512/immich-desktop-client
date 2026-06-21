@@ -1,0 +1,9 @@
+api:
+  key: FlTERFkvGVcEY1NaUgj16ZctbimEdmXMvdAiH3m0
+  url: http://192.168.178.160:2283/api
+  album: null
+  album_by_year: true
+watchdog:
+  recursive: true
+  directories:
+  - C:\Users\Guido\Pictures\

@@ -53,11 +53,16 @@ theoretically the python script is cross platform, therefore it should be execut
 - **`url`**: The base URL of your Immich server API endpoint. _Ensure the URL ends with `/api` and does not have a
   trailing slash._
 - **`album`**: (Optional) The name of the album where media files will be uploaded.
+- **`album_by_year`**: (Optional) If `true`, instead of using a single fixed album, the client automatically
+  creates (or reuses) one album per file creation year (e.g. `2023`, `2024`) and uploads each file into the
+  matching album. Overrides `album` when enabled. Defaults to `false`.
 
 #### `watchdog`
 
 - **`directories`**: A list of directories the client will monitor for media files. Files in these directories will be
   automatically uploaded to the Immich server.
+- **`recursive`**: (Optional) If `true`, the initial upload scans subdirectories as well. Defaults to `false`
+  (top-level files only). Live monitoring for new files always includes subdirectories regardless of this setting.
 
 ### Example Configuration
 

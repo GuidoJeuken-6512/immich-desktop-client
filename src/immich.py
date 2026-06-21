@@ -25,6 +25,8 @@ class Immich:
         else:
             self.__shelve_path = shelve_path
 
+        os.makedirs(os.path.dirname(self.__shelve_path), exist_ok=True)
+
         if device_id is None:
             self.__uuid = self.__get_uuid()
         else:

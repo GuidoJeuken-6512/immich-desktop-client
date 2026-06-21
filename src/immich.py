@@ -13,9 +13,12 @@ import requests
 
 
 class Immich:
-    def __init__(self, immich_host, api_key, album_name=None, album_id=None, device_id=None, shelve_path=None):
+    def __init__(self, immich_host, api_key, album_name=None, album_id=None, device_id=None, shelve_path=None,
+                 album_by_year=False):
         self.__immichHost = immich_host
         self.__apiKey = api_key
+        self.album_by_year = album_by_year
+        self.__album_cache = {}
 
         if shelve_path is None:
             self.__shelve_path = str(Path.home()) + "/.Immich-desktop-client/shelve"
@@ -32,37 +35,63 @@ class Immich:
         else:
             self.album_name = album_name
 
-        if album_id is None:
-            self.__album_id = self.__get_album_id()
+        if self.album_by_year:
+            self.__album_id = None
+        elif album_id is None:
+            self.__album_id = self.__get_or_create_album(self.album_name)
         else:
             self.__album_id = album_id
 
-    def upload_all_images(self, directories, media_file_extensions):
+    def get_matching_files(self, directories, media_file_extensions, recursive=False):
+        matching_files = []
+        for directory in directories:
+            if recursive:
+                for root, _, filenames in os.walk(directory):
+                    for filename in filenames:
+                        if filename.endswith(media_file_extensions):
+                            matching_files.append(os.path.join(root, filename))
+            else:
+                for filename in os.listdir(directory):
+                    if filename.endswith(media_file_extensions):
+                        matching_files.append(os.path.join(directory, filename))
+        return matching_files
+
+    def __sync_with_shelve(self):
+        print("catch up with files already stored in shelve")
         try:
             with shelve.open(self.__shelve_path, flag='r') as db:
-                print("catch up with files already stored in shelve")
-                data = db.keys()
+                data = list(db.keys())
                 for key in data:
                     if os.path.isfile(key):
                         if self.__get_sha1(key) != db[key][1]:
                             self.created(str(key))
                     else:
                         self.delete(key)
-
-                print("uploading new files")
-                matching_files = []
-                for directory in directories:
-                    for filename in os.listdir(directory):
-                        if filename.endswith(media_file_extensions):
-                            matching_files.append(os.path.join(directory, filename))
-
-                for file in matching_files:
-                    if file not in db:
-                        self.created(file)
-
-
+                return set(data)
         except dbm.error:
             print("cant open non-existing shelve")
+            return set()
+
+    def upload_all_images(self, directories, media_file_extensions, recursive=False, progress_callback=None,
+                           should_cancel=None):
+        known_files = self.__sync_with_shelve()
+
+        print("scanning directories for files")
+        matching_files = self.get_matching_files(directories, media_file_extensions, recursive)
+        pending_files = [file for file in matching_files if file not in known_files]
+
+        total = len(pending_files)
+        print(f"found {len(matching_files)} file(s), {total} of them new")
+        if progress_callback:
+            progress_callback(0, total)
+
+        for index, file in enumerate(pending_files, start=1):
+            if should_cancel and should_cancel():
+                print("upload cancelled")
+                break
+            self.created(file)
+            if progress_callback:
+                progress_callback(index, total)
 
     def created(self, file):
         try:
@@ -96,7 +125,14 @@ class Immich:
             image_id = json.loads(response.text)
             print("satus: " + image_id['status'])
             self.__save_image_to_shelve(image_id['id'], file)
-            self.__add_asset_to_album(image_id['id'])
+
+            if self.album_by_year:
+                year = datetime.fromtimestamp(stats.st_mtime).year
+                album_id = self.__get_or_create_album(str(year))
+            else:
+                album_id = self.__album_id
+
+            self.__add_asset_to_album(image_id['id'], album_id)
             print("saved image successfully: " + str(response.text))
 
     # TODO: Create option to replace assets instead of adding the new version
@@ -145,6 +181,36 @@ class Immich:
         except KeyError:
             print("trying to delete non-uploaded file")
 
+    def delete_all_uploads(self):
+        try:
+            with shelve.open(self.__shelve_path, flag='r') as db:
+                asset_ids = [value[0] for value in db.values()]
+        except dbm.error:
+            asset_ids = []
+
+        print(f"deleting {len(asset_ids)} asset(s) previously uploaded by this client")
+
+        if asset_ids:
+            payload = json.dumps({
+                "force": True,
+                "ids": asset_ids,
+            })
+            headers = {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+                'x-api-key': self.__apiKey
+            }
+            try:
+                response = requests.request("DELETE", self.__immichHost + "/assets", headers=headers, data=payload)
+            except Exception as e:
+                print("error when deleting assets: " + str(e))
+            else:
+                print(f"server responded with status {response.status_code}")
+
+        with shelve.open(self.__shelve_path, flag='n'):
+            pass
+        print("local shelve cache cleared")
+
     # TODO create Option for deleting images on server too
     #    try:
     #        assetId = self.__getImageId(file)
@@ -174,10 +240,10 @@ class Immich:
         self.__delete_image_from_shelve(source)
         self.__save_image_to_shelve(asset_id, destination)
 
-    def __create_album(self):
+    def __create_album(self, album_name):
         payload = json.dumps({
-            "albumName": self.album_name,
-            "description": "The Immich Desktop Client puts all images from " + self.album_name + " in this folder",
+            "albumName": album_name,
+            "description": "The Immich Desktop Client puts all images from " + album_name + " in this folder",
         })
         headers = {
             'Content-Type': 'application/json',
@@ -186,9 +252,12 @@ class Immich:
         }
         response = requests.request("POST", self.__immichHost + "/albums", headers=headers, data=payload)
         print("Successfully created album " + str(response.json()))
-        return json.loads(response.text)['asset_id']
+        return json.loads(response.text)['id']
 
-    def __get_album_id(self):
+    def __get_or_create_album(self, album_name):
+        if album_name in self.__album_cache:
+            return self.__album_cache[album_name]
+
         headers = {
             'Accept': 'application/json',
             'x-api-key': self.__apiKey
@@ -199,15 +268,16 @@ class Immich:
 
         album_id = None
         for album in response:
-            if album['albumName'] == self.album_name:
+            if album['albumName'] == album_name:
                 album_id = album['id']
         if album_id is None:
-            print("no album found ... creating new one")
-            album_id = self.__create_album()
+            print(f"no album found for '{album_name}' ... creating new one")
+            album_id = self.__create_album(album_name)
 
+        self.__album_cache[album_name] = album_id
         return album_id
 
-    def __add_asset_to_album(self, asset_id):
+    def __add_asset_to_album(self, asset_id, album_id):
         payload = json.dumps({
             "ids": [
                 str(asset_id)
@@ -219,7 +289,7 @@ class Immich:
             'x-api-key': self.__apiKey
         }
 
-        response = requests.request("PUT", self.__immichHost + "/albums/" + self.__album_id + "/assets",
+        response = requests.request("PUT", self.__immichHost + "/albums/" + album_id + "/assets",
                                     headers=headers, data=payload)
         print(response.json())
         print("successfully added asset to album")

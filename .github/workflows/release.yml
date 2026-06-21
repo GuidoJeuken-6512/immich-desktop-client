@@ -1,0 +1,96 @@
+name: Build and Release Installer
+
+on:
+  push:
+    branches:
+      - master
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Determine version and check if it increased
+        id: version
+        shell: bash
+        run: |
+          NEW_VERSION=$(tr -d '[:space:]' < VERSION)
+          OLD_VERSION=$(git show HEAD~1:VERSION 2>/dev/null | tr -d '[:space:]' || echo "0.0.0")
+          echo "Previous version: $OLD_VERSION"
+          echo "Current version:  $NEW_VERSION"
+
+          python3 - "$OLD_VERSION" "$NEW_VERSION" <<'EOF'
+          import sys
+
+          def parse(v):
+              return tuple(int(p) for p in v.strip().split('.'))
+
+          old, new = sys.argv[1], sys.argv[2]
+          sys.exit(0 if parse(new) > parse(old) else 1)
+          EOF
+          if [ $? -eq 0 ]; then
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+        continue-on-error: true
+
+      - name: Check if release already exists
+        id: existing
+        if: steps.version.outputs.should_release == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "v${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Python
+        if: steps.version.outputs.should_release == 'true' && steps.existing.outputs.exists == 'false'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install Python dependencies
+        if: steps.version.outputs.should_release == 'true' && steps.existing.outputs.exists == 'false'
+        run: pip install -r requirements.txt
+
+      - name: Build executable
+        if: steps.version.outputs.should_release == 'true' && steps.existing.outputs.exists == 'false'
+        run: pyinstaller immich-desktop-client.spec --noconfirm
+
+      - name: Install Inno Setup
+        if: steps.version.outputs.should_release == 'true' && steps.existing.outputs.exists == 'false'
+        run: choco install innosetup -y --no-progress
+        shell: pwsh
+
+      - name: Build installer
+        if: steps.version.outputs.should_release == 'true' && steps.existing.outputs.exists == 'false'
+        shell: pwsh
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" resources\installer-script.iss
+
+      - name: Create GitHub Release
+        if: steps.version.outputs.should_release == 'true' && steps.existing.outputs.exists == 'false'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "v${{ steps.version.outputs.version }}" \
+            "dist/immich-desktop-client.exe" \
+            "dist/immich-desktop-client-installer.exe" \
+            --title "v${{ steps.version.outputs.version }}" \
+            --generate-notes

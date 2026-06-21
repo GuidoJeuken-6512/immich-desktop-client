@@ -1,10 +1,10 @@
 api:
-  key: <API-KEY>
-  url: https://<IMMICH_SERVER_DOMAIN>/api
-  album: <OPTIONAL; OVERRIDE THE DEFAULT ALBUM NAME>
-  album_by_year: false
+  key: REDACTED-API-KEY
+  url: http://REDACTED-HOST:2283/api
+  album: null
+  album_by_year: true
+  delete_remote_on_local_delete: false
 watchdog:
-  recursive: false
+  recursive: true
   directories:
-    - C:\Users\test\Images\
-    - C:\Users\test\Screenshots\
+    - C:\Users\Guido\Pictures\

@@ -14,10 +14,11 @@ import requests
 
 class Immich:
     def __init__(self, immich_host, api_key, album_name=None, album_id=None, device_id=None, shelve_path=None,
-                 album_by_year=False):
+                 album_by_year=False, delete_remote_on_local_delete=False):
         self.__immichHost = immich_host
         self.__apiKey = api_key
         self.album_by_year = album_by_year
+        self.__delete_remote_on_local_delete = delete_remote_on_local_delete
         self.__album_cache = {}
 
         if shelve_path is None:
@@ -66,7 +67,7 @@ class Immich:
                 for key in data:
                     if os.path.isfile(key):
                         if self.__get_sha1(key) != db[key][1]:
-                            self.created(str(key))
+                            self.modify(str(key))
                     else:
                         self.delete(key)
                 return set(data)
@@ -91,11 +92,11 @@ class Immich:
             if should_cancel and should_cancel():
                 print("upload cancelled")
                 break
-            self.created(file)
+            self.created(file, should_cancel=should_cancel)
             if progress_callback:
                 progress_callback(index, total)
 
-    def created(self, file):
+    def created(self, file, should_cancel=None):
         try:
             stats = self.__get_file_stats(file)
         except FileNotFoundError:
@@ -116,72 +117,108 @@ class Immich:
             'isFavorite': 'false',
         }
 
-        files = {
-            'assetData': open(file, 'rb')
-        }
-        try:
-            response = requests.post(self.__immichHost + "/assets", headers=headers, data=data, files=files)
-        except Exception as e:
-            print(e)
+        response = self.__request_with_retry("POST", self.__immichHost + "/assets", file, headers, data,
+                                              should_cancel)
+        if response is None:
+            return
+
+        image_id = json.loads(response.text)
+        print("satus: " + image_id['status'])
+        self.__save_image_to_shelve(image_id['id'], file)
+
+        if self.album_by_year:
+            year = datetime.fromtimestamp(stats.st_mtime).year
+            album_id = self.__get_or_create_album(str(year))
         else:
-            image_id = json.loads(response.text)
-            print("satus: " + image_id['status'])
-            self.__save_image_to_shelve(image_id['id'], file)
+            album_id = self.__album_id
 
-            if self.album_by_year:
-                year = datetime.fromtimestamp(stats.st_mtime).year
-                album_id = self.__get_or_create_album(str(year))
-            else:
-                album_id = self.__album_id
+        self.__add_asset_to_album(image_id['id'], album_id)
+        print("saved image successfully: " + str(response.text))
 
-            self.__add_asset_to_album(image_id['id'], album_id)
-            print("saved image successfully: " + str(response.text))
+    def __request_with_retry(self, method, url, file, headers, data, should_cancel=None):
+        retry_delay = 5
+        while not (should_cancel and should_cancel()):
+            try:
+                with open(file, 'rb') as asset_data:
+                    return requests.request(method, url, headers=headers, data=data,
+                                             files={'assetData': asset_data})
+            except requests.exceptions.RequestException as e:
+                print(f"Verbindung verloren bei {method} {file} ({e}), "
+                      f"erneuter Versuch in {retry_delay}s ...")
+                for _ in range(retry_delay):
+                    if should_cancel and should_cancel():
+                        break
+                    sleep(1)
+                retry_delay = min(retry_delay * 2, 60)
+        return None
 
-    # TODO: Create option to replace assets instead of adding the new version
-    #    def modify(self, file):
-    #                try:
-    #                    stats = self.__get_file_stats(file)
-    #                except FileNotFoundError:
-    #                    print("could not create file")
-    #                    return
-    #        try:
-    #            asset_id = self.__get_image_id(file)
-    #        except KeyError:
-    #            print("trying to modify non-uploaded file ... uploading file")
-    #            self.created(file)
-    #        else:
-    #            print(file)
-    #            data = {
-    #                'deviceAssetId': f"{file}-{stats.st_mtime}",
-    #                'deviceId': self.__uuid,
-    #                'fileCreatedAt': datetime.fromtimestamp(stats.st_mtime),
-    #                'fileModifiedAt': datetime.fromtimestamp(stats.st_mtime)
-    #            }
-    #            files=[
-    #                ('assetData',('IMAGE',open(file,'rb'),'application/octet-stream'))
-    #            ]
-    #            headers = {
-    #                'Accept': 'application/json',
-    #                'x-api-key': self.__apiKey
-    #            }
-    #            try:
-    #                print(f"{self.__immichHost}/assets/{asset_id}/original")
-    #                response = requests.request(method="PUT", url=f"{self.__immichHost}/assets/{asset_id}/original", headers=headers,
-    #                                            files=files, data=data)
-    #            except Exception as e:
-    #                print("error when replacing file" + e.__str__())
-    #            else:
-    #                if response.status_code == 200:
-    #                    self.__save_image_to_shelve(asset_id, file)
-    #                else:
-    #                    print("error when replacing file")
-    #                print(response.text)
+    def modify(self, file, should_cancel=None):
+        try:
+            asset_id, stored_sha1 = self.__get_image_id_and_sha1(file)
+        except (KeyError, *dbm.error):
+            print("trying to modify non-uploaded file ... uploading file")
+            self.created(file, should_cancel=should_cancel)
+            return
+
+        current_sha1 = self.__get_sha1(file)
+        if current_sha1 == stored_sha1:
+            print(f"no actual content change for {file}, skipping replace")
+            return
+
+        try:
+            stats = self.__get_file_stats(file)
+        except FileNotFoundError:
+            print("could not modify file")
+            return
+
+        headers = {
+            'Accept': 'application/json',
+            'x-api-key': self.__apiKey,
+            'x-Immich-checksum': current_sha1,
+        }
+        data = {
+            'deviceAssetId': f"{file}-{stats.st_mtime}",
+            'deviceId': self.__uuid,
+            'fileCreatedAt': datetime.fromtimestamp(stats.st_mtime),
+            'fileModifiedAt': datetime.fromtimestamp(stats.st_mtime),
+        }
+
+        response = self.__request_with_retry(
+            "PUT", f"{self.__immichHost}/assets/{asset_id}/original", file, headers, data, should_cancel)
+        if response is None:
+            return
+
+        if response.status_code == 200:
+            self.__save_image_to_shelve(asset_id, file)
+            print("replaced image successfully: " + str(response.text))
+        else:
+            print(f"error when replacing file: status {response.status_code} {response.text}")
 
     def delete(self, file):
         try:
-            self.__delete_image_from_shelve(file)
-        except KeyError:
+            asset_id = self.__get_image_id(file)
+        except (KeyError, *dbm.error):
             print("trying to delete non-uploaded file")
+            return
+
+        if self.__delete_remote_on_local_delete:
+            self.__delete_asset_from_server(asset_id)
+
+        self.__delete_image_from_shelve(file)
+
+    def __delete_asset_from_server(self, asset_id):
+        payload = json.dumps({"force": True, "ids": [asset_id]})
+        headers = {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+            'x-api-key': self.__apiKey,
+        }
+        try:
+            response = requests.request("DELETE", self.__immichHost + "/assets", headers=headers, data=payload)
+        except Exception as e:
+            print("error when deleting asset: " + str(e))
+        else:
+            print(f"server responded with status {response.status_code}")
 
     def delete_all_uploads(self):
         try:
@@ -213,30 +250,6 @@ class Immich:
             pass
         print("local shelve cache cleared")
 
-    # TODO create Option for deleting images on server too
-    #    try:
-    #        assetId = self.__getImageId(file)
-    #    except KeyError:
-    #        print("deleting non-uploaded file")
-    #    else:
-    #        payload = json.dumps({
-    #            "force": True,
-    #            "ids": [
-    #                assetId
-    #            ]
-    #        })
-    #        headers = {
-    #            'Content-Type': 'application/json',
-    #            'x-api-key': self.__apiKey
-    #        }
-    #        try:
-    #            response = requests.request("DELETE", self.__immichHost + "/assets", headers=headers, data=payload)
-    #        except Exception as e:
-    #            print("error when deleting file: "+ e.__str__())
-    #            return
-    #        else:
-    #            print(response.text)
-    #            self.__delete_image_from_shelve(file)
     def move(self, source, destination):
         asset_id = self.__get_image_id(source)
         self.__delete_image_from_shelve(source)
@@ -305,6 +318,10 @@ class Immich:
         with shelve.open(self.__shelve_path, flag='r') as images:
             image_id = images[file][0]
             return image_id
+
+    def __get_image_id_and_sha1(self, file):
+        with shelve.open(self.__shelve_path, flag='r') as images:
+            return images[file]
 
     def __delete_image_from_shelve(self, file):
         with shelve.open(self.__shelve_path, flag='c', writeback=True) as images:

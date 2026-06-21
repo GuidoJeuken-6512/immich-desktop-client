@@ -14,12 +14,18 @@ desktop to your Immich server.
   Immich server
 - **Uploads to Album**: Automatically creates an album and puts all the images in it
 - **Local Shelve Storage**: Tracks uploaded files using local shelve storage and SHA-1 hashes to avoid duplicate uploads
+- **Replaces Modified Assets**: When a locally tracked file's content changes, the existing server asset is replaced
+  in place instead of being uploaded again as a duplicate
+- **Optional Remote Deletion**: Can optionally delete the corresponding server asset when a locally tracked file is
+  deleted (disabled by default to protect the backup use case)
 - **Checksum Validation**: Ensures data integrity with SHA-1 checksum verification during uploads
+- **Resilient Uploads**: Automatically reconnects and resumes with the next pending file if the connection to the
+  Immich server drops mid-sync, instead of failing the whole sync
+- **Runs in the Background**: Lives in the system tray, keeps syncing after the window is closed or minimized, and
+  can optionally start automatically with Windows
 - **Cross-Platform**: _should_ be compatible with Windows, macOS, and Linux (only tested on Windows 11)
 
-## Demo
 
-<a href="https://youtu.be/lpWbLVVhZjM" target="_blank">Here is a short video demonstrating the use of Immich-Desktop-Client!</a>
 
 ## Prerequisites
 
@@ -33,12 +39,28 @@ desktop to your Immich server.
 #### Windows
 
 1. Install with the Installer executable
-2. modify the config file in the .immich-desktop-client folder in your home directory
+2. modify the config file in the .immich-desktop-client folder in your home directory, or use the in-app
+   Settings dialog (also lets you toggle "Start with Windows", which is enabled by default on first setup)
 3. enjoy
 
 #### Other Platforms
 
 theoretically the python script is cross platform, therefore it should be executable on macOS and Linux
+
+### System Tray
+
+The app behaves like OneDrive or the Nextcloud desktop client:
+
+- Closing or minimizing the window does **not** quit the app — it hides to the system tray and keeps syncing in
+  the background.
+- The tray icon's menu lets you re-open the window, pause/resume syncing, open Settings, delete all uploads, or
+  fully quit the app ("Beenden").
+- Only one instance runs at a time. Starting the app again (e.g. via the Start Menu or Desktop shortcut) while it's
+  already running in the tray just brings the existing window to the front instead of starting a second instance.
+- The Settings dialog has a "Mit Windows starten" (Start with Windows) checkbox, enabled by default on first setup.
+  This is implemented via a registry autostart entry (`HKCU\...\Run`), not via `config.yaml`, so it reflects the
+  actual Windows autostart state even if changed from Windows' own Startup Apps settings. When launched at login,
+  the app starts directly into the tray (internally via a `--background` flag) without flashing a window.
 
 ## Configuration
 
@@ -56,6 +78,9 @@ theoretically the python script is cross platform, therefore it should be execut
 - **`album_by_year`**: (Optional) If `true`, instead of using a single fixed album, the client automatically
   creates (or reuses) one album per file creation year (e.g. `2023`, `2024`) and uploads each file into the
   matching album. Overrides `album` when enabled. Defaults to `false`.
+- **`delete_remote_on_local_delete`**: (Optional) If `true`, deleting a locally tracked file also deletes the
+  corresponding asset on the Immich server. Defaults to `false` so that an accidental local deletion never
+  destroys the server-side backup unless explicitly opted in.
 
 #### `watchdog`
 
@@ -73,7 +98,10 @@ api:
   key: apikey12345
   url: https://immich.domain.test/api
   album: Oida
+  album_by_year: false
+  delete_remote_on_local_delete: false
 watchdog:
+  recursive: false
   directories:
     - C:\Users\test\Images and Videos\
     - C:\Users\test\Screenshots\
@@ -85,8 +113,13 @@ watchdog:
 1. run ``pyinstaller -n immich-dsektop-client -F src/main.py``
 2. run ``resources\installer-script.iss`` with Inno Setup
 
-## Roadmap
+## Versioning & Releases
 
-- Add support for replacing assets instead of duplicating versions.
-- Enable file deletion from the Immich server through the client.
-- Put files from different folders in different albums
+The app version is a single source of truth in the `VERSION` file at the repository root (plain text, e.g. `1.0.0`).
+It is bundled into the app (shown in the window title) and read directly by the Inno Setup script for the
+installer's version info.
+
+Pushing a commit to `master`/`main` that increases the `VERSION` file triggers
+[`.github/workflows/release.yml`](.github/workflows/release.yml), which builds the executable and installer and
+publishes them as a GitHub Release tagged `v<version>`. Pushing without changing `VERSION`, or lowering/repeating
+it, does not create a release.

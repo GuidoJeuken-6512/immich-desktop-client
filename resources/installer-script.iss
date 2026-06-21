@@ -2,7 +2,9 @@
 ; SEE THE DOCUMENTATION FOR DETAILS ON CREATING INNO SETUP SCRIPT FILES!
 
 #define MyAppName "Immich Desktop Client"
-#define MyAppVersion "2024.12.23"
+#define MyVerFile FileOpen("..\VERSION")
+#define MyAppVersion Trim(FileRead(MyVerFile))
+#expr FileClose(MyVerFile)
 #define MyAppPublisher "Maximilian Dorninger"
 #define MyAppURL "https://github.com/CookieDude24/immich-desktop-client"
 #define MyAppExeName "immich-desktop-client.exe"
@@ -55,7 +57,6 @@ Source: "example-config.yaml"; DestDir: "{app}\config.yaml"; Flags: ignoreversio
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
-Name: "{userstartup}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 
 
 [Run]

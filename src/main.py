@@ -1,12 +1,16 @@
 import mimetypes
 import queue
+import socket
 import sys
 import threading
 import tkinter as tk
+import winreg
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+import pystray
 import yaml
+from PIL import Image
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
@@ -21,6 +25,66 @@ else:
 
 CONFIG_PATH = EXE_DIR / 'config.yaml'
 ICON_PATH = BUNDLE_DIR / 'resources' / 'icon.ico'
+VERSION_PATH = BUNDLE_DIR / 'VERSION'
+
+try:
+    APP_VERSION = VERSION_PATH.read_text().strip()
+except FileNotFoundError:
+    APP_VERSION = "dev"
+
+SINGLE_INSTANCE_PORT = 47834
+BACKGROUND_FLAG = "--background"
+
+
+def is_background_launch():
+    return BACKGROUND_FLAG in sys.argv[1:]
+
+
+def acquire_single_instance_lock():
+    lock_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        lock_socket.bind(("127.0.0.1", SINGLE_INSTANCE_PORT))
+    except OSError:
+        lock_socket.close()
+        return None
+    lock_socket.listen(1)
+    return lock_socket
+
+
+def signal_existing_instance_to_show():
+    try:
+        with socket.create_connection(("127.0.0.1", SINGLE_INSTANCE_PORT), timeout=1) as sock:
+            sock.sendall(b"SHOW")
+    except OSError:
+        pass
+
+
+AUTOSTART_REGISTRY_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
+AUTOSTART_VALUE_NAME = "ImmichDesktopClient"
+
+
+def is_autostart_enabled():
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_REGISTRY_PATH, 0, winreg.KEY_READ) as key:
+            winreg.QueryValueEx(key, AUTOSTART_VALUE_NAME)
+            return True
+    except FileNotFoundError:
+        return False
+
+
+def set_autostart(enabled):
+    if not getattr(sys, 'frozen', False):
+        print("Autostart-Umschaltung wird im Entwicklungsmodus ignoriert.")
+        return
+    command = f'"{sys.executable}" {BACKGROUND_FLAG}'
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_REGISTRY_PATH, 0, winreg.KEY_SET_VALUE) as key:
+        if enabled:
+            winreg.SetValueEx(key, AUTOSTART_VALUE_NAME, 0, winreg.REG_SZ, command)
+        else:
+            try:
+                winreg.DeleteValue(key, AUTOSTART_VALUE_NAME)
+            except FileNotFoundError:
+                pass
 
 
 def get_extensions_for_type():
@@ -63,6 +127,11 @@ class SyncEventHandler(FileSystemEventHandler):
             print(f"File {event.src_path} has been deleted!")
             self.api.delete(event.src_path)
 
+    def on_modified(self, event):
+        if not event.is_directory and event.src_path.endswith(self.media_file_extensions):
+            print(f"File {event.src_path} has been modified!")
+            self.api.modify(event.src_path)
+
 
 class ConfigWindow(tk.Toplevel):
     def __init__(self, master, on_saved, existing_config=None):
@@ -102,19 +171,31 @@ class ConfigWindow(tk.Toplevel):
             frm, text="Unterordner beim Start mit hochladen (rekursiv)", variable=self.recursive_var
         ).grid(row=4, column=0, columnspan=3, sticky="w", pady=(0, 5))
 
-        ttk.Label(frm, text="Überwachte Verzeichnisse:").grid(row=5, column=0, sticky="w")
+        self.delete_remote_var = tk.BooleanVar(value=bool(api_cfg.get("delete_remote_on_local_delete", False)))
+        ttk.Checkbutton(
+            frm, text="Beim Löschen einer lokalen Datei auch das zugehörige Asset auf dem Server löschen",
+            variable=self.delete_remote_var,
+        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(0, 5))
+
+        autostart_default = True if existing_config is None else is_autostart_enabled()
+        self.autostart_var = tk.BooleanVar(value=autostart_default)
+        ttk.Checkbutton(
+            frm, text="Mit Windows starten (im Hintergrund)", variable=self.autostart_var,
+        ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(0, 5))
+
+        ttk.Label(frm, text="Überwachte Verzeichnisse:").grid(row=7, column=0, sticky="w")
         self.dir_listbox = tk.Listbox(frm, width=60, height=6, selectmode=tk.EXTENDED)
-        self.dir_listbox.grid(row=6, column=0, columnspan=3, sticky="we")
+        self.dir_listbox.grid(row=8, column=0, columnspan=3, sticky="we")
         for directory in self.directories:
             self.dir_listbox.insert(tk.END, directory)
 
         dir_btn_frame = ttk.Frame(frm)
-        dir_btn_frame.grid(row=7, column=0, columnspan=3, sticky="we", pady=(5, 10))
+        dir_btn_frame.grid(row=9, column=0, columnspan=3, sticky="we", pady=(5, 10))
         ttk.Button(dir_btn_frame, text="Ordner hinzufügen", command=self.add_directory).pack(side="left")
         ttk.Button(dir_btn_frame, text="Entfernen", command=self.remove_directories).pack(side="left", padx=5)
 
         action_frame = ttk.Frame(frm)
-        action_frame.grid(row=8, column=0, columnspan=3, sticky="e")
+        action_frame.grid(row=10, column=0, columnspan=3, sticky="e")
         ttk.Button(action_frame, text="Speichern", command=self.save).pack(side="right")
         ttk.Button(action_frame, text="Abbrechen", command=self.destroy).pack(side="right", padx=5)
 
@@ -152,6 +233,7 @@ class ConfigWindow(tk.Toplevel):
                 "url": url,
                 "album": self.album_var.get().strip() or None,
                 "album_by_year": self.album_by_year_var.get(),
+                "delete_remote_on_local_delete": self.delete_remote_var.get(),
             },
             "watchdog": {
                 "recursive": self.recursive_var.get(),
@@ -161,14 +243,16 @@ class ConfigWindow(tk.Toplevel):
         with open(CONFIG_PATH, "wt") as file:
             yaml.safe_dump(config, file, sort_keys=False, allow_unicode=True)
 
+        set_autostart(self.autostart_var.get())
+
         self.on_saved(config)
         self.destroy()
 
 
 class MainWindow(tk.Tk):
-    def __init__(self):
+    def __init__(self, lock_socket=None):
         super().__init__()
-        self.title("Immich Desktop Client")
+        self.title(f"Immich Desktop Client v{APP_VERSION}")
         self.geometry("640x420")
         try:
             self.iconbitmap(str(ICON_PATH))
@@ -181,20 +265,91 @@ class MainWindow(tk.Tk):
         self.observer = None
         self.sync_active = False
         self.cancel_event = threading.Event()
+        self._quitting = False
+        self._hide_notice_shown = False
+        self._lock_socket = lock_socket
+        self.tray_icon = None
 
         self._orig_stdout = sys.stdout
         sys.stdout = QueueWriter(self.log_queue)
 
         self.config_data = self._load_config()
         self._build_ui()
+        self._build_tray_icon()
         self.after(150, self._poll_log_queue)
         self.after(150, self._poll_progress_queue)
+
+        if self._lock_socket:
+            threading.Thread(target=self._listen_for_show_signal, daemon=True).start()
 
         if self.config_data is None:
             self.status_var.set("Keine Konfiguration gefunden – bitte Einstellungen ausfüllen.")
             self.after(200, self.open_config_window)
+        else:
+            self.status_var.set("Synchronisierung wird gestartet …")
+            self.after(200, self.start_sync)
+            if is_background_launch():
+                self.withdraw()
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.bind("<Unmap>", self._on_minimize)
+
+    def _on_minimize(self, event):
+        if self.state() == "iconic":
+            self._hide_to_tray()
+
+    def _build_tray_icon(self):
+        try:
+            icon_image = Image.open(str(ICON_PATH))
+        except Exception as exc:
+            print(f"Tray-Icon konnte nicht geladen werden: {exc}")
+            return
+
+        menu = pystray.Menu(
+            pystray.MenuItem("Öffnen", self._tray_show_window, default=True),
+            pystray.MenuItem(
+                lambda item: "Synchronisierung pausieren" if self.sync_active else "Synchronisierung fortsetzen",
+                self._tray_toggle_sync,
+            ),
+            pystray.MenuItem("Einstellungen", self._tray_open_settings),
+            pystray.MenuItem("Alle Uploads löschen", self._tray_delete_all_uploads),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Beenden", self._tray_quit),
+        )
+        self.tray_icon = pystray.Icon("immich-desktop-client", icon_image, "Immich Desktop Client", menu)
+        threading.Thread(target=self.tray_icon.run, daemon=True).start()
+
+    def _listen_for_show_signal(self):
+        while True:
+            try:
+                conn, _ = self._lock_socket.accept()
+            except OSError:
+                return
+            with conn:
+                conn.recv(16)
+            self.after(0, self._show_window)
+
+    def _show_window(self):
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+
+    def _tray_show_window(self, icon=None, item=None):
+        self.after(0, self._show_window)
+
+    def _tray_toggle_sync(self, icon=None, item=None):
+        self.after(0, self.cancel_sync if self.sync_active else self.start_sync)
+
+    def _tray_open_settings(self, icon=None, item=None):
+        self.after(0, self._show_window)
+        self.after(0, self.open_config_window)
+
+    def _tray_delete_all_uploads(self, icon=None, item=None):
+        self.after(0, self._show_window)
+        self.after(0, self.delete_all_uploads)
+
+    def _tray_quit(self, icon=None, item=None):
+        self.after(0, self.quit_app)
 
     @staticmethod
     def _load_config():
@@ -370,11 +525,13 @@ class MainWindow(tk.Tk):
             immich_host = config["api"]["url"]
             album_name = config["api"].get("album")
             album_by_year = config["api"].get("album_by_year", False)
+            delete_remote_on_local_delete = config["api"].get("delete_remote_on_local_delete", False)
             api_key = config["api"]["key"]
             directories_to_watch = config["watchdog"]["directories"]
             recursive_scan = config["watchdog"].get("recursive", False)
 
-            api = Immich(immich_host, api_key, album_name, album_by_year=album_by_year)
+            api = Immich(immich_host, api_key, album_name, album_by_year=album_by_year,
+                         delete_remote_on_local_delete=delete_remote_on_local_delete)
             api.test_connection()
             api.print_shelve()
             api.upload_all_images(
@@ -403,13 +560,38 @@ class MainWindow(tk.Tk):
             self.after(0, self._reset_start_button)
 
     def on_close(self):
+        self._hide_to_tray()
+
+    def _hide_to_tray(self):
+        self.withdraw()
+        if not self._hide_notice_shown:
+            self._hide_notice_shown = True
+            if self.tray_icon:
+                try:
+                    self.tray_icon.notify(
+                        "Immich Desktop Client läuft im Hintergrund weiter.",
+                        "Immich Desktop Client",
+                    )
+                except Exception as exc:
+                    print(f"Tray-Benachrichtigung fehlgeschlagen: {exc}")
+
+    def quit_app(self):
+        self._quitting = True
         self.cancel_event.set()
         if self.observer:
             self.observer.stop()
             self.observer.join(timeout=2)
         sys.stdout = self._orig_stdout
+        if self.tray_icon:
+            self.tray_icon.stop()
+        if self._lock_socket:
+            self._lock_socket.close()
         self.destroy()
 
 
 if __name__ == "__main__":
-    MainWindow().mainloop()
+    instance_lock = acquire_single_instance_lock()
+    if instance_lock is None:
+        signal_existing_instance_to_show()
+        sys.exit(0)
+    MainWindow(instance_lock).mainloop()

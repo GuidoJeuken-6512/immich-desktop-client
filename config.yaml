@@ -3,6 +3,7 @@ api:
   url: http://192.168.178.160:2283/api
   album: null
   album_by_year: true
+  delete_remote_on_local_delete: false
 watchdog:
   recursive: true
   directories:

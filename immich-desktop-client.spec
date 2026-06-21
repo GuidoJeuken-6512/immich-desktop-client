@@ -5,7 +5,7 @@ a = Analysis(
     ['src\\main.py'],
     pathex=[],
     binaries=[],
-    datas=[('resources\\icon.ico', 'resources')],
+    datas=[('resources\\icon.ico', 'resources'), ('VERSION', '.')],
     hiddenimports=['dbm.sqlite3', 'sqlite3'],
     hookspath=[],
     hooksconfig={},

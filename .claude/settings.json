@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(sed -i 's/\"setup.py\"/\"README.md\"/' /tmp/test_retry.py)",
+      "Bash(.venv/Scripts/python.exe /tmp/test_retry.py)",
+      "Bash(rm -f /tmp/test_retry.py)",
+      "Bash(tasklist //FI \"IMAGENAME eq python3.13.exe\" //FO CSV)",
+      "Bash(taskkill //PID 12444 //F)",
+      "Bash(.venv/Scripts/python.exe -m py_compile src/immich.py)",
+      "Bash(.venv/Scripts/python.exe /tmp/test_modify_delete.py)",
+      "Bash(tasklist //FI \"PID eq 4528\" //FO CSV)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(.venv/Scripts/python.exe -c ' *)",
+      "Bash(taskkill //PID 7824 //F)",
+      "Bash(taskkill //PID 21232 //F)",
+      "Bash(taskkill //PID 19468 //F)",
+      "Bash(.venv/Scripts/python.exe -m pip freeze)",
+      "Bash(bash -c *)",
+      "Bash(tasklist //FI \"PID eq 16616\" //FO CSV)",
+      "Bash(taskkill //PID 16616 //F)",
+      "Bash(taskkill //PID 16464 //F)",
+      "PowerShell(\\(Get-Item \"C:\\\\cursor\\\\immich-desktop-client\\\\dist\\\\immich-desktop-client-installer.exe\"\\).VersionInfo | Format-List FileVersion, ProductVersion)"
+    ],
+    "additionalDirectories": [
+      "\\tmp"
+    ]
+  }
+}

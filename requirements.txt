@@ -1,0 +1,7 @@
+requests==2.34.2
+PyYAML==6.0.3
+watchdog==6.0.0
+pillow==12.2.0
+pystray==0.19.5
+pyinstaller==6.21.0
+pyinstaller-hooks-contrib==2026.6

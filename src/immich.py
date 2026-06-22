@@ -92,7 +92,10 @@ class Immich:
             if should_cancel and should_cancel():
                 print("upload cancelled")
                 break
-            self.created(file, should_cancel=should_cancel)
+            try:
+                self.created(file, should_cancel=should_cancel)
+            except Exception as exc:
+                print(f"error when uploading file {file}: {exc}")
             if progress_callback:
                 progress_callback(index, total)
 
@@ -123,7 +126,11 @@ class Immich:
             return
 
         image_id = json.loads(response.text)
-        print("satus: " + image_id['status'])
+        if 'id' not in image_id:
+            print(f"error when uploading file {file}: status {response.status_code} {response.text}")
+            return
+
+        print("status: " + image_id.get('status', 'unknown'))
         self.__save_image_to_shelve(image_id['id'], file)
 
         if self.album_by_year:

@@ -110,8 +110,9 @@ watchdog:
 
 ## Build it yourself
 
-1. run ``pyinstaller -n immich-dsektop-client -F src/main.py``
-2. run ``resources\installer-script.iss`` with Inno Setup
+1. run ``pip install -r requirements.txt``
+2. run ``pyinstaller immich-desktop-client.spec --noconfirm``
+3. run ``resources\installer-script.iss`` with Inno Setup
 
 ## Versioning & Releases
 

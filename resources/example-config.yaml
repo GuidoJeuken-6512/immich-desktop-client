@@ -1,10 +1,10 @@
 api:
-  key: REDACTED-API-KEY
-  url: http://REDACTED-HOST:2283/api
+  key: apikey12345
+  url: https://immich.domain.test/api
   album: null
   album_by_year: true
   delete_remote_on_local_delete: false
 watchdog:
   recursive: true
   directories:
-    - C:\Users\Guido\Pictures\
+    - C:\Users\test\Pictures\
